@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CondenseAI</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="header">
+        <div class="header-text">
+          <h1 id="app-title">CondenseAI</h1>
+          <p id="app-subtitle" class="subtitle">Local AI via Ollama</p>
+        </div>
+        <button id="reset-btn" type="button" class="btn-reset hidden" title="Clear conversation" aria-label="Clear conversation">
+          &#x1F5D1;
+        </button>
+      </header>
+
+      <button id="summarize-btn" type="button" class="btn-primary">Summarize</button>
+
+      <div id="status" class="status hidden" aria-live="polite"></div>
+
+      <div id="error" class="error hidden" role="alert"></div>
+
+      <section id="summary-section" class="summary-section hidden">
+        <h2 id="summary-title" class="summary-title"></h2>
+        <ul id="summary-list" class="summary-list"></ul>
+      </section>
+
+      <section id="followup-section" class="followup-section hidden">
+        <p class="followup-label" id="followup-label">Ask a follow-up</p>
+        <div id="followup-answers" class="followup-answers"></div>
+        <div id="followup-status" class="followup-status hidden" aria-live="polite"></div>
+        <div class="followup-row">
+          <input
+            id="followup-input"
+            type="text"
+            class="followup-input"
+            placeholder="Ask a follow-up question\u2026"
+            autocomplete="off"
+          />
+          <button id="followup-btn" type="button" class="btn-send" aria-label="Send">&#10148;</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
