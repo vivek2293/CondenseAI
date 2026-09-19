@@ -1,14 +1,31 @@
 # CondenseAI
 
-A Chrome extension that condenses any webpage into concise summaries using a **local AI model** via [Ollama](https://ollama.com). All processing happens on your machine — no data is sent to external APIs.
+A Chrome extension that turns any webpage into a concise summary using a **local AI model** via [Ollama](https://ollama.com). Everything runs on your machine — no data ever leaves your computer.
 
 ## Features
 
-- Floating **panel** injected into the page — draggable, minimizable, closable, and stays put while you browse
-- One-click **Summarize** button that extracts readable page content (menus, ads, and scripts stripped when possible)
-- Generates 5–8 bullet-point summaries via Ollama, with a 120 s abort timeout
-- **Reset** button always available — cancels any in-flight summarize/follow-up request and clears the conversation
-- Configurable provider architecture (Ollama today, extensible later)
+**Floating panel**
+- A small panel appears on the page when you click the toolbar icon — drag it anywhere, minimize it out of the way, or close it entirely
+- Reopening the panel restores your previous summary and conversation without re-summarizing
+
+**One-click summarization**
+- Click **Summarize** and get a clean 5–8 bullet-point summary of the page in seconds
+- Page clutter (ads, menus, navigation) is stripped before summarizing
+
+**Follow-up questions**
+- After a summary appears, ask any question about the page in the text box below it
+- The AI answers in context — it remembers the summary and all previous questions in the session
+- Ask as many follow-up questions as you like; the conversation thread grows as you go
+
+**Always in control**
+- The **Reset** button immediately cancels any in-progress request and clears the conversation
+- Works across multiple tabs independently — summarizing one tab never affects another
+- If you navigate away or reopen the panel, your last summary and Q&A thread are still there
+
+**Private by design**
+- All AI processing runs locally via Ollama — no cloud APIs, no telemetry, no accounts
+
+---
 
 ## Prerequisites
 
@@ -28,6 +45,8 @@ Ensure Ollama is serving (it usually starts automatically):
 ollama serve
 ```
 
+---
+
 ## Setup
 
 ```bash
@@ -42,13 +61,17 @@ Load the extension in Chrome:
 3. Click **Load unpacked**
 4. Select the `dist` folder from this project
 
+---
+
 ## Usage
 
 1. Open any webpage with readable content
-2. Click the extension icon in the toolbar — a floating panel appears on the page (drag its header to reposition it)
-3. Click **Summarize**
-4. Wait for the summary (5–8 bullets) to appear in the panel
-5. Use the header buttons to **reset** (cancels the request and clears the conversation), **minimize** (collapses to just the header), or **close** (removes the panel — click the toolbar icon again to reopen it)
+2. Click the **CondenseAI** icon in the toolbar — a floating panel appears
+3. Click **Summarize** and wait for the bullet-point summary
+4. Type a question in the **"Ask a follow-up"** box and press **Enter** (or ➤)
+5. Use the header buttons to **Reset**, **Minimize**, or **Close** the panel
+
+---
 
 ## Development
 
@@ -61,7 +84,10 @@ npm test            # Unit tests (Vitest)
 npm run verify      # typecheck + tests + build (same as pre-commit)
 ```
 
-A **pre-commit hook** runs `npm run verify` so type errors, failing unit tests, or a broken extension build cannot be committed silently. Do not skip hooks (`--no-verify`) unless you have an explicit reason.
+A **pre-commit hook** runs `npm run verify` so type errors, failing unit tests, or a broken build cannot be committed silently.
+
+---
+
 ## Configuration
 
 Settings are stored in `chrome.storage.sync` under the key `appConfig`. Defaults:
@@ -74,7 +100,7 @@ Settings are stored in `chrome.storage.sync` under the key `appConfig`. Defaults
 | `maxInputChars` | `8000` |
 | `requestTimeoutMs` | `120000` |
 
-To change settings from the browser console (extension service worker context or via storage):
+To change settings from the browser console (service worker context):
 
 ```js
 chrome.storage.sync.set({
@@ -87,12 +113,15 @@ chrome.storage.sync.set({
 
 Partial updates are merged with defaults on next use.
 
+---
+
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| "Ollama isn't running" / "Cannot reach Ollama" | Start Ollama from the Start menu / Applications (or `ollama serve`), then **reload the extension** at `chrome://extensions` |
+| "Ollama isn't running" / "Cannot reach Ollama" | Start Ollama (`ollama serve`), then **reload the extension** at `chrome://extensions` |
 | "Model not found" | Pull the model: `ollama pull llama3.1` |
 | "This page has no readable content" | Page may be empty or image-only |
 | "Can't summarize this type of page" | `chrome://`, `edge://`, and extension pages are restricted |
-| Summary is slow | Large pages are truncated; try a shorter article or faster model |
+| Summary is slow | Try a shorter article or a faster model |
+| Follow-up feels off-topic | Hit **Reset** and re-summarize to start a fresh conversation |
