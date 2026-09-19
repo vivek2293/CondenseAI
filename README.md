@@ -1,6 +1,6 @@
-# CondenseAI
+# CondenseAI — Privacy-Safe Web Summaries at Zero Token Cost
 
-A Chrome extension that turns any webpage into a concise summary using a **local AI model** via [Ollama](https://ollama.com). Everything runs on your machine — no data ever leaves your computer.
+A Chrome extension that turns any webpage into a concise summary using a **local AI model** via [Ollama](https://ollama.com). No API keys. No subscription. No data leaving your machine. Just instant, private summaries at no ongoing cost.
 
 ## Features
 
@@ -22,8 +22,9 @@ A Chrome extension that turns any webpage into a concise summary using a **local
 - Works across multiple tabs independently — summarizing one tab never affects another
 - If you navigate away or reopen the panel, your last summary and Q&A thread are still there
 
-**Private by design**
-- All AI processing runs locally via Ollama — no cloud APIs, no telemetry, no accounts
+**Privacy-safe & zero token cost**
+- All AI processing runs locally via Ollama — no cloud APIs, no API keys, no per-request charges, no telemetry, no accounts required
+- Ideal for sensitive documents, internal research, or teams with data-residency requirements
 
 ---
 
