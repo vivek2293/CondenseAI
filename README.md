@@ -4,9 +4,10 @@ A Chrome extension that condenses any webpage into concise summaries using a **l
 
 ## Features
 
-- One-click **Summarize** button in the extension popup
-- Extracts readable page content (menus, ads, and scripts stripped when possible)
-- Generates 5–8 bullet-point summaries via Ollama
+- Floating **panel** injected into the page — draggable, minimizable, closable, and stays put while you browse
+- One-click **Summarize** button that extracts readable page content (menus, ads, and scripts stripped when possible)
+- Generates 5–8 bullet-point summaries via Ollama, with a 120 s abort timeout
+- **Reset** button always available — cancels any in-flight summarize/follow-up request and clears the conversation
 - Configurable provider architecture (Ollama today, extensible later)
 
 ## Prerequisites
@@ -44,18 +45,23 @@ Load the extension in Chrome:
 ## Usage
 
 1. Open any webpage with readable content
-2. Click the extension icon in the toolbar
+2. Click the extension icon in the toolbar — a floating panel appears on the page (drag its header to reposition it)
 3. Click **Summarize**
-4. Wait for the summary (5–8 bullets) to appear in the popup
+4. Wait for the summary (5–8 bullets) to appear in the panel
+5. Use the header buttons to **reset** (cancels the request and clears the conversation), **minimize** (collapses to just the header), or **close** (removes the panel — click the toolbar icon again to reopen it)
 
 ## Development
 
 ```bash
-npm run dev    # Vite dev server with HMR — reload extension after changes
-npm run build  # Production build to dist/
-npm test       # Run unit tests
+npm install         # also installs the git pre-commit hook (Husky)
+npm run dev         # Vite dev server with HMR — reload extension after changes
+npm run build       # Production build to dist/
+npm run typecheck   # TypeScript only
+npm test            # Unit tests (Vitest)
+npm run verify      # typecheck + tests + build (same as pre-commit)
 ```
 
+A **pre-commit hook** runs `npm run verify` so type errors, failing unit tests, or a broken extension build cannot be committed silently. Do not skip hooks (`--no-verify`) unless you have an explicit reason.
 ## Configuration
 
 Settings are stored in `chrome.storage.sync` under the key `appConfig`. Defaults:
@@ -65,7 +71,7 @@ Settings are stored in `chrome.storage.sync` under the key `appConfig`. Defaults
 | `provider` | `ollama` |
 | `ollamaBaseUrl` | `http://127.0.0.1:11434` |
 | `model` | `llama3.1` |
-| `maxInputChars` | `12000` |
+| `maxInputChars` | `8000` |
 | `requestTimeoutMs` | `120000` |
 
 To change settings from the browser console (extension service worker context or via storage):
@@ -85,7 +91,7 @@ Partial updates are merged with defaults on next use.
 
 | Problem | Solution |
 |---------|----------|
-| "Ollama isn't running" / "Cannot reach Ollama" | Start Ollama: `ollama serve`, then **reload the extension** at `chrome://extensions` |
+| "Ollama isn't running" / "Cannot reach Ollama" | Start Ollama from the Start menu / Applications (or `ollama serve`), then **reload the extension** at `chrome://extensions` |
 | "Model not found" | Pull the model: `ollama pull llama3.1` |
 | "This page has no readable content" | Page may be empty or image-only |
 | "Can't summarize this type of page" | `chrome://`, `edge://`, and extension pages are restricted |
