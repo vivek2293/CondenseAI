@@ -77,4 +77,105 @@ describe("OllamaProvider", () => {
       }),
     ).rejects.toMatchObject({ code: ErrorCode.PROVIDER_UNAVAILABLE });
   });
+
+  it("throws CANCELLED when the external signal aborts the request (Reset)", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        }),
+      ),
+    );
+
+    const provider = new OllamaProvider(config);
+    const pending = provider.summarize("text", {
+      title: "T",
+      url: "https://x.com",
+      timeoutMs: 5000,
+      signal: controller.signal,
+    });
+
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ code: ErrorCode.CANCELLED });
+  });
+
+  it("throws TIMEOUT (not CANCELLED) when only the timeout fires", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        }),
+      ),
+    );
+
+    const provider = new OllamaProvider(config);
+    const pending = provider.summarize("text", {
+      title: "T",
+      url: "https://x.com",
+      timeoutMs: 1000,
+    });
+    const assertion = expect(pending).rejects.toMatchObject({ code: ErrorCode.TIMEOUT });
+
+    await vi.advanceTimersByTimeAsync(1001);
+    await assertion;
+    vi.useRealTimers();
+  });
+
+  it("cancels a pending follow-up via the external signal", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        }),
+      ),
+    );
+
+    const provider = new OllamaProvider(config);
+    const pending = provider.askFollowUp("question?", [], {
+      timeoutMs: 5000,
+      signal: controller.signal,
+    });
+
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ code: ErrorCode.CANCELLED });
+  });
+
+  it("askFollowUp returns answer and appends history on success", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ message: { content: "Because reasons." } }),
+      }),
+    );
+
+    const provider = new OllamaProvider(config);
+    const history = [
+      { role: "system" as const, content: "sys" },
+      { role: "user" as const, content: "ctx" },
+      { role: "assistant" as const, content: "ok" },
+    ];
+
+    const result = await provider.askFollowUp("Why?", history, { timeoutMs: 5000 });
+    expect(result.answer).toBe("Because reasons.");
+    expect(result.conversationHistory.at(-1)).toEqual({
+      role: "assistant",
+      content: "Because reasons.",
+    });
+    expect(result.conversationHistory.at(-2)).toMatchObject({ role: "user" });
+  });
 });
