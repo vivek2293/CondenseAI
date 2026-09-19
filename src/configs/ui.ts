@@ -16,4 +16,9 @@ export const UI_CONFIG = {
   followupSendLabel: "\u27A4",
   followupLoadingMsg: "Thinking\u2026",
   followupSectionTitle: "Ask a follow-up",
+
+  resetLabel: "Reset (cancels any in-progress request)",
+  minimizeLabel: "Minimize",
+  restoreLabel: "Restore",
+  closeLabel: "Close",
 } as const;

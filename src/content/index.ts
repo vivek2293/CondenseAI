@@ -2,10 +2,12 @@ import { toSummarizeFailure } from "../shared/errors";
 import { createLogger } from "../shared/logger";
 import {
   isExtractPageTextMessage,
+  isTogglePanelMessage,
   MessageType,
   type ExtractedPage,
 } from "../shared/messages";
 import { extractPageText } from "./extractPageText";
+import { togglePanel } from "../panel/panelView";
 
 const log = createLogger("content");
 
@@ -45,6 +47,12 @@ if (window.__condenseAIContentScriptLoaded) {
   window.__condenseAIContentScriptLoaded = true;
 
   chrome.runtime.onMessage.addListener((message) => {
+    if (isTogglePanelMessage(message)) {
+      log.info("Toggle panel requested", { tabId: message.tabId });
+      togglePanel(message.tabId);
+      return false;
+    }
+
     if (!isExtractPageTextMessage(message)) {
       return false;
     }

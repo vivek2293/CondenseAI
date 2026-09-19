@@ -10,8 +10,7 @@
     "file:///*"
   ],
   "action": {
-    "default_popup": "src/popup/index.html",
-    "default_title": "CondenseAI",
+    "default_title": "CondenseAI \u2014 click to open panel",
     "default_icon": {
       "16": "public/icons/icon16.png",
       "48": "public/icons/icon48.png",
