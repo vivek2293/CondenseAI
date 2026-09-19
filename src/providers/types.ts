@@ -5,10 +5,14 @@ export interface SummarizeOptions {
   title: string;
   url: string;
   timeoutMs: number;
+  /** External cancellation (e.g. user hit Reset). Distinct from the timeoutMs abort. */
+  signal?: AbortSignal;
 }
 
 export interface FollowUpOptions {
   timeoutMs: number;
+  /** External cancellation (e.g. user hit Reset). Distinct from the timeoutMs abort. */
+  signal?: AbortSignal;
 }
 
 export interface FollowUpResult {

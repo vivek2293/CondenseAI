@@ -86,6 +86,7 @@ async function tryOllamaCandidates(
   maxOutputTokens: number,
   controller: AbortController,
   timeoutMs: number,
+  externalSignal?: AbortSignal,
 ): Promise<string> {
   let lastError: unknown;
 
@@ -134,6 +135,10 @@ async function tryOllamaCandidates(
       }
 
       if (error instanceof DOMException && error.name === "AbortError") {
+        if (externalSignal?.aborted) {
+          log.info("Ollama request cancelled by user", { baseUrl });
+          throw new AppError(ErrorCode.CANCELLED, getUserMessage(ErrorCode.CANCELLED));
+        }
         log.error("Ollama request timed out", error, { baseUrl, timeoutMs });
         throw mapFetchError(error, model, baseUrl);
       }
@@ -160,6 +165,8 @@ export class OllamaProvider implements SummarizerProvider {
     const timeoutMs = options.timeoutMs || this.config.requestTimeoutMs;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    options.signal?.addEventListener("abort", onExternalAbort);
 
     const messages = buildChatMessages({ title: options.title, url: options.url, text });
     const candidates = getOllamaBaseUrlCandidates(this.config.ollamaBaseUrl);
@@ -179,12 +186,14 @@ export class OllamaProvider implements SummarizerProvider {
         this.config.maxOutputTokens,
         controller,
         timeoutMs,
+        options.signal,
       );
     } catch (error) {
       if (error instanceof AppError) throw error;
       throw mapFetchError(error, this.config.model, candidates[0]);
     } finally {
       clearTimeout(timeoutId);
+      options.signal?.removeEventListener("abort", onExternalAbort);
     }
   }
 
@@ -196,6 +205,8 @@ export class OllamaProvider implements SummarizerProvider {
     const timeoutMs = options.timeoutMs || this.config.requestTimeoutMs;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    options.signal?.addEventListener("abort", onExternalAbort);
 
     const messages: ChatMessage[] = [
       ...conversationHistory,
@@ -220,6 +231,7 @@ export class OllamaProvider implements SummarizerProvider {
         this.config.maxOutputTokens,
         controller,
         timeoutMs,
+        options.signal,
       );
 
       const newHistory: ChatMessage[] = [
@@ -240,6 +252,7 @@ export class OllamaProvider implements SummarizerProvider {
       throw mapFetchError(error, this.config.model, candidates[0]);
     } finally {
       clearTimeout(timeoutId);
+      options.signal?.removeEventListener("abort", onExternalAbort);
     }
   }
 }
