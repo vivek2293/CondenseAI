@@ -5,11 +5,13 @@ import { AppError, ErrorCode, getUserMessage, toSummarizeFailure } from "../shar
 import { createLogger } from "../shared/logger";
 import {
   isAskFollowUpMessage,
+  isCancelJobMessage,
   isPageExtractFailedMessage,
   isPageExtractedMessage,
+  isSummarizeActiveTabMessage,
   MessageType,
+  type AckResponse,
   type BackgroundContentMessage,
-  type BackgroundInboundMessage,
   type ChatMessage,
   type ExtractedPage,
   type FollowUpResponse,
@@ -18,7 +20,7 @@ import {
 import { buildChatMessages, buildFollowUpContext } from "../shared/prompt";
 import { sanitizeQuestion } from "../shared/sanitize";
 import { truncate } from "../shared/truncate";
-import { delay } from "../shared/delay";
+import { delay, delayUnlessAborted } from "../shared/delay";
 import {
   cancelPageExtraction,
   createRequestId,
@@ -27,52 +29,128 @@ import {
   resolvePageExtraction,
   waitForPageExtraction,
 } from "./extractionBridge";
-import { savePopupSession } from "../shared/popupSession";
+import {
+  clearPopupSession,
+  loadPopupSession,
+  savePopupSession,
+  type PopupSession,
+} from "../shared/popupSession";
 
 const log = createLogger("background");
 
-const TAB_QUERY_RETRIES = 3;
-const TAB_QUERY_RETRY_DELAY_MS = 150;
 const EXTRACTION_RETRIES = 3;
 const EXTRACTION_RETRY_DELAY_MS = 400;
 const OLLAMA_RETRIES = 2;
 const OLLAMA_RETRY_DELAY_MS = 1_500;
+const POST_INJECT_SETTLE_MS = 300;
 
-async function getActiveTab() {
-  for (let attempt = 1; attempt <= TAB_QUERY_RETRIES; attempt++) {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+// Panel UI runs in a content-script / untrusted context. Session storage is
+// service-worker-only by default — open it so the panel can read/write popupState.
+void chrome.storage.session
+  .setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" })
+  .then(() => {
+    log.info("chrome.storage.session accessible from content scripts");
+  })
+  .catch((error) => {
+    log.warn("Failed to expose chrome.storage.session to content scripts", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 
-    if (tab?.id) {
-      if (tab.url || attempt === TAB_QUERY_RETRIES) {
-        log.debug("Active tab resolved", {
-          tabId: tab.id,
-          url: tab.url,
-          title: tab.title,
-          attempt,
-        });
-        return tab;
-      }
+// ── Cancelable job registry (per tab) ────────────────────────────────────────
+//
+// Each tab can run at most one summarize/follow-up job. Tabs do not cancel each
+// other. Starting a new request in the *same* tab supersedes that tab's job so
+// Reset / double-Summarize stays idempotent.
 
-      log.warn("Active tab URL not ready yet, retrying", {
-        tabId: tab.id,
-        attempt,
-      });
-    } else {
-      log.warn("No active tab with id, retrying", { attempt });
-    }
+interface ActiveJob {
+  id: number;
+  tabId: number;
+  controller: AbortController;
+  extractionRequestId: string | null;
+}
 
-    if (attempt < TAB_QUERY_RETRIES) {
-      await delay(TAB_QUERY_RETRY_DELAY_MS);
-    }
+let jobCounter = 0;
+const activeJobs = new Map<number, ActiveJob>();
+
+function cancelActiveJob(tabId: number, reason: string): boolean {
+  const job = activeJobs.get(tabId);
+  if (!job) {
+    return false;
   }
 
-  log.warn("Failed to resolve active tab after retries");
-  throw new AppError(ErrorCode.RESTRICTED_PAGE, getUserMessage(ErrorCode.RESTRICTED_PAGE));
+  activeJobs.delete(tabId);
+  job.controller.abort();
+  if (job.extractionRequestId) {
+    rejectPageExtraction(job.extractionRequestId, ErrorCode.CANCELLED, getUserMessage(ErrorCode.CANCELLED));
+    job.extractionRequestId = null;
+  }
+  log.info("Cancelled active job", { jobId: job.id, tabId, reason });
+  return true;
+}
+
+function startJob(tabId: number): ActiveJob {
+  cancelActiveJob(tabId, "superseded by new request");
+  const job: ActiveJob = {
+    id: ++jobCounter,
+    tabId,
+    controller: new AbortController(),
+    extractionRequestId: null,
+  };
+  activeJobs.set(tabId, job);
+  return job;
+}
+
+function isCurrentJob(job: ActiveJob): boolean {
+  return activeJobs.get(job.tabId)?.id === job.id;
+}
+
+/**
+ * Write session state only while this job still owns the tab. If we lose
+ * ownership mid-write, undo only when the stored row still carries our jobId
+ * so a newer job's session is never cleared.
+ */
+async function commitPopupSession(
+  job: ActiveJob,
+  session: Omit<PopupSession, "jobId">,
+): Promise<boolean> {
+  if (!isCurrentJob(job)) {
+    return false;
+  }
+
+  await savePopupSession({ ...session, jobId: job.id });
+
+  if (isCurrentJob(job)) {
+    return true;
+  }
+
+  const latest = await loadPopupSession(job.tabId);
+  if (latest?.jobId === job.id) {
+    await clearPopupSession(job.tabId);
+    log.info("Undid stale session write after job lost ownership", {
+      jobId: job.id,
+      tabId: job.tabId,
+      status: session.status,
+    });
+  }
+  return false;
+}
+
+function finishJob(job: ActiveJob): void {
+  if (activeJobs.get(job.tabId)?.id === job.id) {
+    activeJobs.delete(job.tabId);
+  }
+}
+
+function throwIfJobCancelled(job: ActiveJob): void {
+  if (job.controller.signal.aborted || !isCurrentJob(job)) {
+    throw new AppError(ErrorCode.CANCELLED, getUserMessage(ErrorCode.CANCELLED));
+  }
 }
 
 function isRestrictedUrl(url?: string): boolean {
   if (!url) {
-    // URL may be unavailable briefly on first popup open; allow extraction to proceed.
+    // URL may be unavailable briefly on first load; allow extraction to proceed.
     return false;
   }
   return (
@@ -86,6 +164,11 @@ function isRestrictedUrl(url?: string): boolean {
 function isRetriableExtractionError(error: unknown): boolean {
   if (!(error instanceof AppError)) {
     return true;
+  }
+
+  // Never retry user cancel / superseded jobs.
+  if (error.code === ErrorCode.CANCELLED) {
+    return false;
   }
 
   return (
@@ -138,22 +221,23 @@ function mapExtractionError(error: unknown): AppError {
   );
 }
 
-async function extractPageFromTab(tabId: number): Promise<ExtractedPage> {
+async function extractPageFromTab(tabId: number, job: ActiveJob): Promise<ExtractedPage> {
   const endTimer = log.time("page extraction");
   let lastError: unknown;
-  let activeRequestId: string | null = null;
 
   try {
     for (let attempt = 1; attempt <= EXTRACTION_RETRIES; attempt++) {
+      throwIfJobCancelled(job);
+
       const requestId = createRequestId();
-      activeRequestId = requestId;
+      job.extractionRequestId = requestId;
 
       try {
         log.info("Starting page extraction attempt", { tabId, requestId, attempt });
         const extractionPromise = waitForPageExtraction(requestId);
         await dispatchExtractionRequest(tabId, requestId, injectContentScript);
         const page = await extractionPromise;
-        activeRequestId = null;
+        job.extractionRequestId = null;
         log.info("Page extraction succeeded", {
           tabId,
           requestId,
@@ -163,9 +247,9 @@ async function extractPageFromTab(tabId: number): Promise<ExtractedPage> {
         });
         return page;
       } catch (error) {
-        if (activeRequestId) {
-          cancelPageExtraction(activeRequestId);
-          activeRequestId = null;
+        if (job.extractionRequestId) {
+          cancelPageExtraction(job.extractionRequestId);
+          job.extractionRequestId = null;
         }
 
         lastError = error;
@@ -183,15 +267,18 @@ async function extractPageFromTab(tabId: number): Promise<ExtractedPage> {
         });
 
         if (attempt < EXTRACTION_RETRIES) {
-          await delay(EXTRACTION_RETRY_DELAY_MS);
+          throwIfJobCancelled(job);
+          await delayUnlessAborted(EXTRACTION_RETRY_DELAY_MS, job.controller.signal);
+          throwIfJobCancelled(job);
         }
       }
     }
 
     throw mapExtractionError(lastError);
   } finally {
-    if (activeRequestId) {
-      cancelPageExtraction(activeRequestId);
+    if (job.extractionRequestId) {
+      cancelPageExtraction(job.extractionRequestId);
+      job.extractionRequestId = null;
     }
     endTimer();
   }
@@ -210,16 +297,25 @@ function handleContentMessage(message: BackgroundContentMessage): void {
 
 async function callWithOllamaRetry<T>(
   label: string,
+  signal: AbortSignal,
   fn: () => Promise<T>,
 ): Promise<T> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= OLLAMA_RETRIES; attempt++) {
+    if (signal.aborted) {
+      throw new AppError(ErrorCode.CANCELLED, getUserMessage(ErrorCode.CANCELLED));
+    }
+
     try {
       log.info(`${label} attempt`, { attempt, maxAttempts: OLLAMA_RETRIES });
       return await fn();
     } catch (error) {
       lastError = error;
+
+      if (error instanceof AppError && error.code === ErrorCode.CANCELLED) {
+        throw error;
+      }
 
       const retriable =
         error instanceof AppError && error.code === ErrorCode.PROVIDER_UNAVAILABLE;
@@ -239,48 +335,33 @@ async function callWithOllamaRetry<T>(
         attempt,
         delayMs: OLLAMA_RETRY_DELAY_MS,
       });
-      await delay(OLLAMA_RETRY_DELAY_MS);
+      await delayUnlessAborted(OLLAMA_RETRY_DELAY_MS, signal);
     }
   }
 
   throw lastError;
 }
 
-async function summarizeActiveTab(): Promise<SummarizeResponse> {
+async function summarizeActiveTab(
+  job: ActiveJob,
+  tabId: number,
+  tabUrl: string,
+): Promise<SummarizeResponse> {
   const endTimer = log.time("summarize pipeline");
-  log.info("Summarize pipeline started");
-
-  let tabUrl = "";
-  let tabId: number | undefined;
+  log.info("Summarize pipeline started", { tabId, tabUrl });
 
   try {
-    const tab = await getActiveTab();
-    if (!tab.id) {
+    if (isRestrictedUrl(tabUrl)) {
+      log.warn("Restricted page blocked", { url: tabUrl, tabId });
       throw new AppError(ErrorCode.RESTRICTED_PAGE, getUserMessage(ErrorCode.RESTRICTED_PAGE));
     }
 
-    tabId = tab.id;
-    tabUrl = tab.url ?? "";
-
-    if (isRestrictedUrl(tab.url)) {
-      log.warn("Restricted page blocked", { url: tab.url, tabId: tab.id });
-      throw new AppError(ErrorCode.RESTRICTED_PAGE, getUserMessage(ErrorCode.RESTRICTED_PAGE));
+    if (!(await commitPopupSession(job, { status: "loading", tabUrl, tabId }))) {
+      throw new AppError(ErrorCode.CANCELLED, getUserMessage(ErrorCode.CANCELLED));
     }
 
-    await savePopupSession({
-      status: "loading",
-      tabUrl,
-      tabId,
-    });
-
-    if (!tab.url) {
-      log.warn("Active tab URL unavailable; proceeding with content-script extraction", {
-        tabId: tab.id,
-      });
-    }
-
-    log.info("Extracting page content", { tabId, url: tab.url ?? "(unknown)" });
-    const page = await extractPageFromTab(tabId);
+    log.info("Extracting page content", { tabId, url: tabUrl });
+    const page = await extractPageFromTab(tabId, job);
     tabUrl = page.url || tabUrl;
 
     const config = await getConfig();
@@ -295,17 +376,18 @@ async function summarizeActiveTab(): Promise<SummarizeResponse> {
 
     const provider = createProvider(config);
     const summarizeTimer = log.time("provider summarize");
-    const summary = await callWithOllamaRetry("Ollama summarize", () =>
+    const summary = await callWithOllamaRetry("Ollama summarize", job.controller.signal, () =>
       provider.summarize(text, {
         title: page.title,
         url: page.url,
         timeoutMs: config.requestTimeoutMs,
+        signal: job.controller.signal,
       }),
     );
     summarizeTimer();
 
     log.info("Summarize pipeline succeeded", {
-      tabId: tab.id,
+      tabId,
       pageTitle: page.title,
       extractionMethod: page.method,
       ...log.tokens(summary.length),
@@ -314,15 +396,20 @@ async function summarizeActiveTab(): Promise<SummarizeResponse> {
     // Build compact 3-turn context for follow-ups (no raw page text, no question yet)
     const conversationHistory: ChatMessage[] = buildFollowUpContext(page.title, summary);
 
-    await savePopupSession({
-      status: "done",
-      tabUrl,
-      tabId,
-      pageTitle: page.title,
-      summary,
-      conversationHistory,
-      qaThread: [],
-    });
+    if (
+      !(await commitPopupSession(job, {
+        status: "done",
+        tabUrl,
+        tabId,
+        pageTitle: page.title,
+        summary,
+        conversationHistory,
+        qaThread: [],
+      }))
+    ) {
+      log.info("Summarize job cancelled/superseded; discarding result", { jobId: job.id, tabId });
+      return { ok: true, summary, pageTitle: page.title, extractionMethod: page.method, conversationHistory };
+    }
 
     return {
       ok: true,
@@ -335,18 +422,26 @@ async function summarizeActiveTab(): Promise<SummarizeResponse> {
     const failure = toSummarizeFailure(error);
     log.error("Summarize pipeline failed", error, { code: failure.code });
 
-    if (tabId) {
-      await savePopupSession({
-        status: "error",
-        tabUrl,
+    if (!isCurrentJob(job) || failure.code === ErrorCode.CANCELLED) {
+      log.info("Summarize job cancelled/superseded; suppressing error session", {
+        jobId: job.id,
         tabId,
-        errorCode: failure.code,
-        errorMessage: failure.message,
+        code: failure.code,
       });
+      throw error;
     }
+
+    await commitPopupSession(job, {
+      status: "error",
+      tabUrl,
+      tabId,
+      errorCode: failure.code,
+      errorMessage: failure.message,
+    });
 
     throw error;
   } finally {
+    finishJob(job);
     endTimer();
   }
 }
@@ -354,6 +449,7 @@ async function summarizeActiveTab(): Promise<SummarizeResponse> {
 async function handleFollowUp(
   question: string,
   conversationHistory: ChatMessage[],
+  job: ActiveJob,
 ): Promise<FollowUpResponse> {
   const endTimer = log.time("follow-up pipeline");
   const safeQuestion = sanitizeQuestion(question);
@@ -372,9 +468,10 @@ async function handleFollowUp(
     const config = await getConfig();
     const provider = createProvider(config);
 
-    const result = await callWithOllamaRetry("Ollama follow-up", () =>
+    const result = await callWithOllamaRetry("Ollama follow-up", job.controller.signal, () =>
       provider.askFollowUp(safeQuestion, conversationHistory, {
         timeoutMs: config.requestTimeoutMs,
+        signal: job.controller.signal,
       }),
     );
 
@@ -397,9 +494,50 @@ async function handleFollowUp(
     });
     return { ok: false, ...failure };
   } finally {
+    finishJob(job);
     endTimer();
   }
 }
+
+// ── Floating panel toggle (toolbar icon click) ───────────────────────────────
+
+async function togglePanelInTab(tabId: number): Promise<void> {
+  const message = { type: MessageType.TOGGLE_PANEL, tabId };
+
+  try {
+    await chrome.tabs.sendMessage(tabId, message);
+    log.info("Toggled panel", { tabId });
+    return;
+  } catch (error) {
+    if (!isMissingContentScriptError(error)) {
+      log.warn("Could not toggle panel", { tabId, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+  }
+
+  try {
+    log.info("Content script not reachable, injecting before toggling panel", { tabId });
+    await injectContentScript(tabId);
+    await delay(POST_INJECT_SETTLE_MS);
+    await chrome.tabs.sendMessage(tabId, message);
+    log.info("Toggled panel after injection", { tabId });
+  } catch (error) {
+    log.warn("Panel unavailable on this page", {
+      tabId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab.id) {
+    log.warn("Action clicked but tab has no id");
+    return;
+  }
+  void togglePanelInTab(tab.id);
+});
+
+// ── Message router ───────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (isPageExtractedMessage(message) || isPageExtractFailedMessage(message)) {
@@ -407,15 +545,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
+  if (isCancelJobMessage(message)) {
+    const cancelled = cancelActiveJob(message.tabId, "cancelled by user");
+    log.info("Cancel job requested", { tabId: message.tabId, cancelled });
+    sendResponse({ ok: true } satisfies AckResponse);
+    return false;
+  }
+
   if (isAskFollowUpMessage(message)) {
     log.info("Received follow-up request", {
       question: message.question,
       historyTurns: message.conversationHistory.length,
+      tabId: message.tabId,
     });
-    handleFollowUp(message.question, message.conversationHistory)
+    const job = startJob(message.tabId);
+    handleFollowUp(message.question, message.conversationHistory, job)
       .then((result) => {
         log.info("Sending follow-up response", {
           ok: result.ok,
+          tabId: message.tabId,
           ...(result.ok
             ? {
                 answerChars: result.answer.length,
@@ -428,17 +576,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if ((message as BackgroundInboundMessage).type !== MessageType.SUMMARIZE_ACTIVE_TAB) {
+  if (!isSummarizeActiveTabMessage(message)) {
     return false;
   }
 
-  log.info("Received summarize request");
+  log.info("Received summarize request", { tabId: message.tabId, tabUrl: message.tabUrl });
 
-  // Acknowledge immediately so closing the popup (e.g. on tab switch) does not
-  // cancel the in-flight job. Results are delivered via chrome.storage.session.
-  void summarizeActiveTab().catch((error) => {
+  // Acknowledge immediately so closing/reopening the panel does not cancel the
+  // in-flight job. Results are delivered via chrome.storage.session (per tab).
+  const job = startJob(message.tabId);
+  void summarizeActiveTab(job, message.tabId, message.tabUrl).catch((error) => {
     const failure = toSummarizeFailure(error);
-    log.warn("Summarize job failed", failure);
+    log.warn("Summarize job failed", { ...failure, tabId: message.tabId });
   });
 
   sendResponse({ ok: true, started: true } satisfies SummarizeResponse);
