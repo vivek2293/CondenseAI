@@ -4,6 +4,7 @@ export const ErrorCode = {
   MODEL_NOT_FOUND: "MODEL_NOT_FOUND",
   TIMEOUT: "TIMEOUT",
   RESTRICTED_PAGE: "RESTRICTED_PAGE",
+  CANCELLED: "CANCELLED",
   UNKNOWN: "UNKNOWN",
 } as const;
 
@@ -27,6 +28,7 @@ const USER_MESSAGES: Record<ErrorCode, string> = {
     "Model not found. Run `ollama pull llama3.1` (or your configured model).",
   [ErrorCode.TIMEOUT]: "Summary took too long. Try a shorter page.",
   [ErrorCode.RESTRICTED_PAGE]: "Can't summarize this type of page.",
+  [ErrorCode.CANCELLED]: "Cancelled.",
   [ErrorCode.UNKNOWN]: "Something went wrong. Please try again.",
 };
 

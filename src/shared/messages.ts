@@ -4,6 +4,8 @@ export const MessageType = {
   PAGE_EXTRACTED: "PAGE_EXTRACTED",
   PAGE_EXTRACT_FAILED: "PAGE_EXTRACT_FAILED",
   ASK_FOLLOW_UP: "ASK_FOLLOW_UP",
+  CANCEL_JOB: "CANCEL_JOB",
+  TOGGLE_PANEL: "TOGGLE_PANEL",
 } as const;
 
 export type MessageType = (typeof MessageType)[keyof typeof MessageType];
@@ -43,6 +45,11 @@ export interface SummarizeStarted {
   started: true;
 }
 
+/** Generic ack used by fire-and-forget control messages (cancel, etc.). */
+export interface AckResponse {
+  ok: true;
+}
+
 export type SummarizeResponse = SummarizeSuccess | SummarizeFailure | SummarizeStarted;
 
 export function isSummarizeStarted(
@@ -62,12 +69,29 @@ export type FollowUpResponse = FollowUpSuccess | SummarizeFailure;
 
 export interface SummarizeActiveTabMessage {
   type: typeof MessageType.SUMMARIZE_ACTIVE_TAB;
+  /** Tab the panel is attached to — the panel knows this directly, no active-tab lookup needed. */
+  tabId: number;
+  tabUrl: string;
 }
 
 export interface AskFollowUpMessage {
   type: typeof MessageType.ASK_FOLLOW_UP;
   question: string;
   conversationHistory: ChatMessage[];
+  /** Tab that owns this follow-up — jobs are scoped per tab. */
+  tabId: number;
+}
+
+/** Panel → Background: abort the in-flight job for a specific tab (if any). */
+export interface CancelJobMessage {
+  type: typeof MessageType.CANCEL_JOB;
+  tabId: number;
+}
+
+/** Background → Content script: mount/reveal the floating panel for this tab. */
+export interface TogglePanelMessage {
+  type: typeof MessageType.TOGGLE_PANEL;
+  tabId: number;
 }
 
 export interface ExtractPageTextMessage {
@@ -88,14 +112,17 @@ export interface PageExtractFailedMessage {
   message: string;
 }
 
-/** Messages the popup sends to the background service worker. */
-export type BackgroundInboundMessage = SummarizeActiveTabMessage | AskFollowUpMessage;
+/** Messages the panel sends to the background service worker. */
+export type BackgroundInboundMessage =
+  | SummarizeActiveTabMessage
+  | AskFollowUpMessage
+  | CancelJobMessage;
 
 /** Messages the background receives from the content script. */
 export type BackgroundContentMessage = PageExtractedMessage | PageExtractFailedMessage;
 
 /** Messages the background dispatches to the content script. */
-export type ContentInboundMessage = ExtractPageTextMessage;
+export type ContentInboundMessage = ExtractPageTextMessage | TogglePanelMessage;
 
 /** Messages the content script pushes to the background. */
 export type ContentOutboundMessage = PageExtractedMessage | PageExtractFailedMessage;
@@ -136,6 +163,36 @@ export function isAskFollowUpMessage(
   return (
     typeof message === "object" &&
     message !== null &&
-    (message as AskFollowUpMessage).type === MessageType.ASK_FOLLOW_UP
+    (message as AskFollowUpMessage).type === MessageType.ASK_FOLLOW_UP &&
+    typeof (message as AskFollowUpMessage).tabId === "number"
+  );
+}
+
+export function isCancelJobMessage(message: unknown): message is CancelJobMessage {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    (message as CancelJobMessage).type === MessageType.CANCEL_JOB &&
+    typeof (message as CancelJobMessage).tabId === "number"
+  );
+}
+
+export function isTogglePanelMessage(message: unknown): message is TogglePanelMessage {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    (message as TogglePanelMessage).type === MessageType.TOGGLE_PANEL
+  );
+}
+
+export function isSummarizeActiveTabMessage(
+  message: unknown,
+): message is SummarizeActiveTabMessage {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    (message as SummarizeActiveTabMessage).type === MessageType.SUMMARIZE_ACTIVE_TAB &&
+    typeof (message as SummarizeActiveTabMessage).tabId === "number" &&
+    typeof (message as SummarizeActiveTabMessage).tabUrl === "string"
   );
 }
